@@ -15,6 +15,7 @@ from .classifier import SignWindowClassifier
 from .config import BreathConfig
 from .flow import LowLight, dy_score, farneback
 from .roi import RoiTracker
+from .smooth import SmoothClassifier
 from .types import BreathState, FrameResult, Shoulders
 
 
@@ -23,12 +24,15 @@ class BreathEngine:
         self.cfg = cfg or BreathConfig()
         self._roi = RoiTracker(self.cfg)
         self._clf = SignWindowClassifier(self.cfg)
+        self._v2 = SmoothClassifier(self.cfg)
         self._low = LowLight(self.cfg)
         self.reset()
 
     def reset(self) -> None:
         self._roi.reset()
         self._clf.reset()
+        self._v2.reset()
+        self._last_ts: Optional[float] = None
         self._prev_gray: Optional[np.ndarray] = None
         self._smoothed: Optional[Shoulders] = None
         self.dy_flow = 0.0
@@ -47,19 +51,41 @@ class BreathEngine:
         self._smoothed = Shoulders(lerp(p.left, s.left), lerp(p.right, s.right))
         return self._smoothed
 
+    def _finish(self, res: FrameResult, segment: Optional[int]) -> FrameResult:
+        sm = self._v2
+        res.level = sm.level
+        res.confidence = sm.confidence
+        res.breath_position = sm.position
+        res.breath_count = sm.breath_count
+        res.breath_rate_bpm = sm.rate_bpm
+        if self.cfg.classifier == "smooth":
+            res.raw_state = res.state_smooth
+            res.state = sm.validate(res.state_smooth, segment)
+        return res
+
     def process(self, frame_rgb: np.ndarray, shoulders: Optional[Shoulders],
-                guide_segment: Optional[int] = None) -> FrameResult:
+                guide_segment: Optional[int] = None,
+                timestamp_ms: Optional[float] = None) -> FrameResult:
         """
         frame_rgb:     HxWx3 uint8, RGB, top-down (the frame the pose ran on).
         shoulders:     pose landmarks 11/12 in pixels of that frame, or None.
         guide_segment: optional GuideSegment of the on-screen breathing guide.
+        timestamp_ms:  frame time; None = assume cfg.ref_fps.
         """
         t0 = time.perf_counter()
         cfg = self.cfg
+        dt = 1.0 / cfg.ref_fps
+        if timestamp_ms is not None and timestamp_ms >= 0:
+            if self._last_ts is not None:
+                dt = max(0.0, (timestamp_ms - self._last_ts) / 1000.0)
+            self._last_ts = timestamp_ms
+
         if shoulders is None:
             # Unity: SetState(Skip) and return - the vote window is untouched.
-            return FrameResult(BreathState.SKIP, BreathState.SKIP, self.dy_flow,
-                               self._clf.count_pos, self._clf.count_neg)
+            res = FrameResult(BreathState.SKIP, BreathState.SKIP, self.dy_flow,
+                              self._clf.count_pos, self._clf.count_neg)
+            res.state_smooth = self._v2.update(0.0, False, False, dt)
+            return self._finish(res, guide_segment)
 
         s = self._smooth(shoulders)
         h, w = frame_rgb.shape[:2]
@@ -97,6 +123,9 @@ class BreathEngine:
 
         raw = self._clf.push(self.dy_flow)
         state = self._clf.validate(raw, guide_segment)
+        smooth_state = self._v2.update(self.dy_flow, flow_valid, True, dt)
         timings["total"] = (time.perf_counter() - t0) * 1e3
-        return FrameResult(state, raw, self.dy_flow, self._clf.count_pos,
-                           self._clf.count_neg, rect, reanchored, flow_valid, s, timings)
+        res = FrameResult(state, raw, self.dy_flow, self._clf.count_pos,
+                          self._clf.count_neg, rect, reanchored, flow_valid, s, timings,
+                          state_votes=raw, state_smooth=smooth_state)
+        return self._finish(res, guide_segment)

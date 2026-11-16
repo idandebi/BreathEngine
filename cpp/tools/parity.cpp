@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
     be_engine* e = be_create(&cfg);
 
     FILE* out = std::fopen(argv[2], "w");
-    std::fprintf(out, "frame,state,raw_state,dy_flow,votes_pos,votes_neg,roi_x,roi_y,roi_w,roi_h,reanchored,flow_valid,ms\n");
+    std::fprintf(out, "frame,state,raw_state,dy_flow,votes_pos,votes_neg,roi_x,roi_y,roi_w,roi_h,reanchored,flow_valid,ms,state_smooth,level,position,breaths\n");
     std::vector<uint8_t> px(static_cast<size_t>(w) * h * 3);
     double total_ms = 0;
     for (int f = 0; f < n; ++f) {
@@ -59,14 +59,15 @@ int main(int argc, char** argv) {
         be_image img{px.data(), w, h, w * 3, BE_FORMAT_RGB, 0, nullptr, 0};
         be_shoulders s{sh[0], sh[1], sh[2], sh[3]};
         be_result r{};
-        if (be_process(e, &img, has ? &s : nullptr, seg, &r) != BE_OK) {
+        if (be_process(e, &img, has ? &s : nullptr, seg, f * 1000.0 / 30.0, &r) != BE_OK) {
             std::fprintf(stderr, "be_process failed at frame %d\n", f);
             return 1;
         }
         total_ms += r.process_ms;
-        std::fprintf(out, "%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%d,%d,%.3f\n", f, r.state, r.raw_state,
-                     r.dy_flow, r.votes_pos, r.votes_neg, r.roi_x, r.roi_y, r.roi_w, r.roi_h,
-                     r.reanchored, r.flow_valid, r.process_ms);
+        std::fprintf(out, "%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%d,%.6f,%.6f,%d\n", f,
+                     r.state, r.raw_state, r.dy_flow, r.votes_pos, r.votes_neg, r.roi_x, r.roi_y,
+                     r.roi_w, r.roi_h, r.reanchored, r.flow_valid, r.process_ms, r.state_smooth,
+                     r.level, r.breath_position, r.breath_count);
     }
     std::fclose(out);
     be_destroy(e);

@@ -57,3 +57,10 @@ class FrameResult:
     flow_valid: bool = False        # dy_flow was freshly computed this frame
     shoulders: Optional[Shoulders] = None
     timings_ms: dict = field(default_factory=dict)
+    state_votes: BreathState = BreathState.SKIP    # raw, vote classifier
+    state_smooth: BreathState = BreathState.SKIP   # raw, smooth classifier
+    level: float = 0.0
+    confidence: float = 0.0
+    breath_position: float = 0.0
+    breath_count: int = 0
+    breath_rate_bpm: float = 0.0

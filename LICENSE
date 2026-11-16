@@ -1,0 +1,9 @@
+Copyright (c) 2026 idandebi. All rights reserved.
+
+The source code in this repository is published for viewing and evaluation
+only. No license is granted to use, copy, modify, distribute or sell it, in
+whole or in part, without prior written permission from the author.
+
+Third-party components keep their own licenses:
+  - models/pose_landmarker_full.task: MediaPipe (Google), Apache License 2.0
+  - OpenCV, MediaPipe Tasks, CameraX: fetched as dependencies under their own licenses

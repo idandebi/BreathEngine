@@ -1,9 +1,7 @@
 """Tunable parameters.
 
-Defaults are the values compiled into the latest Unity build (field
-initializers recovered from IL2CPP, ios/unityExportNew2, May 2026).
-NOTE: Unity scenes can override serialized fields in the Inspector; those
-overrides are not recoverable from code, so treat these as the baseline.
+Defaults reproduce the v1 algorithm as shipped in the original Unity app
+(see docs/ALGORITHM.md).
 """
 from __future__ import annotations
 
@@ -54,3 +52,16 @@ class BreathConfig:
     threshold_exhale: float = 9.0      # boostThreshold_Ex
     hold_penalty: float = 2.0          # extra votes needed during hold phases
     use_guide_validation: bool = True  # only used when a guide segment is given
+
+    # --- which classifier drives FrameResult.state ------------------------
+    classifier: str = "votes"          # "votes" (Unity) or "smooth" (v2)
+
+    # --- v2 smooth classifier (see smooth.py) -------------------------------
+    ref_fps: float = 30.0
+    v2_clip: float = 30.0
+    v2_tau: float = 0.2
+    v2_on: float = 3.0
+    v2_off: float = 1.0
+    v2_hold_time: float = 0.4
+    v2_min_dwell: float = 0.3
+    v2_position_tau: float = 8.0

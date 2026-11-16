@@ -80,14 +80,15 @@ def write_besq(path, frames):
 def run_python(frames):
     eng = BreathEngine(BreathConfig())
     rows = []
-    for frame, sh, seg in frames:
+    for i, (frame, sh, seg) in enumerate(frames):
         s = None
         if sh is not None:
             s = Shoulders((float(sh[0]), float(sh[1])), (float(sh[2]), float(sh[3])))
-        r = eng.process(frame, s, None if seg < 0 else seg)
+        r = eng.process(frame, s, None if seg < 0 else seg, i * 1000.0 / 30.0)
         roi = (r.roi.x, r.roi.y, r.roi.w, r.roi.h) if r.roi else (0, 0, 0, 0)
         rows.append(dict(state=int(r.state), raw=int(r.raw_state), dy=r.dy_flow, roi=roi,
-                         re=int(r.reanchored), pos=r.count_pos, neg=r.count_neg))
+                         re=int(r.reanchored), pos=r.count_pos, neg=r.count_neg,
+                         sm=int(r.state_smooth), lvl=r.level))
     return rows
 
 
@@ -98,7 +99,8 @@ def read_cpp(path):
             out.append(dict(state=int(row["state"]), raw=int(row["raw_state"]), dy=float(row["dy_flow"]),
                             roi=tuple(int(row[k]) for k in ("roi_x", "roi_y", "roi_w", "roi_h")),
                             re=int(row["reanchored"]), pos=int(row["votes_pos"]),
-                            neg=int(row["votes_neg"]), ms=float(row["ms"])))
+                            neg=int(row["votes_neg"]), ms=float(row["ms"]),
+                            sm=int(row["state_smooth"]), lvl=float(row["level"])))
     return out
 
 
@@ -126,10 +128,13 @@ def main():
         n_in = sum(p["state"] == 2 for p in py)
         n_ex = sum(p["state"] == 3 for p in py)
         ms = np.mean([c["ms"] for c in cc])
-        ok = eq("roi") == 1 and eq("re") == 1 and eq("state") >= 0.99
+        dl = np.abs(np.array([p["lvl"] for p in py]) - np.array([c["lvl"] for c in cc]))
+        ok = (eq("roi") == 1 and eq("re") == 1 and eq("state") >= 0.99 and eq("sm") >= 0.99
+              and dl.max() < 1e-3)
         all_ok &= ok
         print(f"{name:12s} {eq('state'):8.1%} {eq('raw'):8.1%} {eq('roi'):6.0%} {eq('re'):7.0%} "
-              f"{d.max():10.4f} {np.median(d):10.5f} {ms:7.2f}  {n_in}/{n_ex}  {'OK' if ok else 'MISMATCH'}")
+              f"{d.max():10.4f} {np.median(d):10.5f} {ms:7.2f}  {n_in}/{n_ex}  "
+              f"v2 {eq('sm'):6.1%} lvl|d| {dl.max():.1e}  {'OK' if ok else 'MISMATCH'}")
     print("PARITY OK" if all_ok else "PARITY FAILED")
     sys.exit(0 if all_ok else 1)
 

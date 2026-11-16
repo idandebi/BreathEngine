@@ -1,7 +1,6 @@
 """Shoulder detection with MediaPipe Tasks PoseLandmarker.
 
-Uses the same model file that ships in the Unity build
-(Data/Raw/pose_landmarker_full.bytes -> models/pose_landmarker_full.task).
+Model: models/pose_landmarker_full.task (MediaPipe, Apache-2.0).
 """
 from __future__ import annotations
 

@@ -151,6 +151,60 @@ def test_breathing_cycle_alternates():
     assert np.mean(velocity[inhale_idx] > 0) > 0.9
 
 
+def test_smooth_classifier_hysteresis():
+    from breath_engine.smooth import SmoothClassifier
+    sc = SmoothClassifier(BreathConfig())
+    dt = 1 / 30
+    states = [sc.update(8.0, True, True, dt) for _ in range(30)]
+    assert states[-1] == BreathState.INHALE
+    # Short noisy dips do not break the inhale (unlike the vote window).
+    for v in [-2.0, 6.0, -1.0, 7.0, 5.0, -3.0, 8.0]:
+        assert sc.update(v, True, True, dt) == BreathState.INHALE
+    # A real reversal switches to exhale.
+    states = [sc.update(-8.0, True, True, dt) for _ in range(30)]
+    assert states[-1] == BreathState.EXHALE
+    # Stillness -> NO_DETECT after hold_time.
+    states = [sc.update(0.0, True, True, dt) for _ in range(60)]
+    assert states[-1] == BreathState.NO_DETECT
+    assert sc.breath_count == 1
+    # Missing person -> SKIP.
+    assert sc.update(0.0, False, False, dt) == BreathState.SKIP
+
+
+def test_smooth_classifier_is_fps_independent():
+    from breath_engine.smooth import SmoothClassifier
+
+    def onset(fps):
+        sc = SmoothClassifier(BreathConfig())
+        for i in range(fps * 2):
+            # Same physical speed: per-frame displacement scales with 1/fps.
+            if sc.update(6.0 * 30 / fps, True, True, 1 / fps) == BreathState.INHALE:
+                return i / fps
+    assert abs(onset(15) - onset(60)) < 0.08
+
+
+def test_breathing_cycle_smooth_classifier():
+    eng = BreathEngine(BreathConfig(classifier="smooth"))
+    t = np.arange(240) / 30.0
+    offsets = 3.0 * np.sin(2 * np.pi * t / 4.0)
+    canvas = textured_canvas()
+    res = [eng.process(f, SHOULDERS, None, i * 1000 / 30)
+           for i, f in enumerate(subpixel_frames(offsets, canvas))]
+    velocity = np.gradient(offsets)
+
+    def frames_correct(states):
+        """Fraction of ALL frames labelled with the true direction."""
+        ok = [(s == BreathState.INHALE and v > 0) or (s == BreathState.EXHALE and v < 0)
+              for s, v in zip(states, velocity)]
+        return np.mean(ok)
+
+    smooth = frames_correct([r.state for r in res])
+    votes = frames_correct([r.state_votes for r in res])
+    assert smooth > 0.8
+    assert smooth > votes          # no gaps at turning points
+    assert res[-1].breath_count >= 2
+
+
 def test_guide_pattern():
     g = BreathGuide("4-7-8")
     assert g.segment_at(0)[0] == GuideSegment.INHALE

@@ -145,7 +145,7 @@ static void test_c_api_formats_and_rotation() {
             be_image img{px.data, px.cols, px.rows, static_cast<int32_t>(px.step), format, rotation,
                          nullptr, 0};
             be_shoulders s{220, 240, 420, 240};
-            CHECK(be_process(e, &img, &s, BE_GUIDE_NONE, &res) == BE_OK);
+            CHECK(be_process(e, &img, &s, BE_GUIDE_NONE, -1.0, &res) == BE_OK);
             states.push_back(res.state);
         }
         be_destroy(e);
@@ -175,17 +175,212 @@ static void test_c_api_formats_and_rotation() {
         }
         be_image img{y.data, W, H, W, BE_FORMAT_NV21, 0, vu.data(), W};
         be_shoulders s{220, 240, 420, 240};
-        CHECK(be_process(e, &img, &s, BE_GUIDE_NONE, &res) == BE_OK);
+        CHECK(be_process(e, &img, &s, BE_GUIDE_NONE, -1.0, &res) == BE_OK);
     }
     CHECK(res.state == BE_STATE_INHALE);
     be_image bad{nullptr, 0, 0, 0, BE_FORMAT_RGB, 0, nullptr, 0};
-    CHECK(be_process(e, &bad, nullptr, BE_GUIDE_NONE, &res) == BE_ERR_INVALID_ARG);
+    CHECK(be_process(e, &bad, nullptr, BE_GUIDE_NONE, -1.0, &res) == BE_ERR_INVALID_ARG);
     be_destroy(e);
+}
+
+static void test_smooth_classifier() {
+    be_config cfg = be_default_config();
+    SmoothClassifier sc(cfg);
+    const double dt = 1.0 / 30;
+    State st = State::Skip;
+    for (int i = 0; i < 30; ++i) st = sc.update(8.0, true, true, dt);
+    CHECK(st == State::Inhale);
+    for (double v : {-2.0, 6.0, -1.0, 7.0, 5.0, -3.0, 8.0}) CHECK(sc.update(v, true, true, dt) == State::Inhale);
+    for (int i = 0; i < 30; ++i) st = sc.update(-8.0, true, true, dt);
+    CHECK(st == State::Exhale);
+    for (int i = 0; i < 60; ++i) st = sc.update(0.0, true, true, dt);
+    CHECK(st == State::NoDetect);
+    CHECK(sc.breath_count() == 1);
+    CHECK(sc.update(0.0, false, false, dt) == State::Skip);
+
+    // Guide validation never reports the opposite direction.
+    SmoothClassifier g(cfg);
+    for (int i = 0; i < 30; ++i) g.update(8.0, true, true, dt);
+    CHECK(g.validate(State::Inhale, BE_GUIDE_EXHALE) == State::NoDetect);
+    CHECK(g.validate(State::Inhale, BE_GUIDE_HOLD_TOP) == State::Inhale);
+}
+
+static void test_grid_signal() {
+    be_config cfg = be_default_config();
+    cfg.signal_source = BE_SIGNAL_GRID;
+    const cv::Mat canvas = textured_canvas(H + 200, W);
+    Engine e(cfg);
+    Result r;
+    for (int i = 0; i < 15; ++i) r = e.process(shifted(canvas, i * 0.5), &kShoulders, BE_GUIDE_NONE, i * 33.3);
+    std::printf("  grid: %d valid points, dy %.1f chest %.1f belly %.1f\n", r.feature_count,
+                r.dy_features, r.dy_chest, r.dy_belly);
+    CHECK(r.signal_valid && r.feature_count >= 30);
+    CHECK(std::abs(r.dy_features - 50.0) < 5.0);
+    CHECK(std::abs(r.dy_chest - 50.0) < 5.0 && std::abs(r.dy_belly - 50.0) < 5.0);
+    CHECK(r.state_smooth == State::Inhale);
+    {   // Points spread evenly from the ROI (chest) down to the upper belly.
+        CHECK(r.roi.has_value());
+        const Rect roi = r.roi.value_or(Rect{});
+        int in_roi = 0, below = 0;
+        for (const auto& p : r.points) {
+            if (p.y >= roi.y - 2 && p.y <= roi.y + roi.h + 2) ++in_roi;
+            else if (p.y > roi.y + roi.h) ++below;
+        }
+        std::printf("  grid spread: %d in ROI, %d below it\n", in_roi, below);
+        CHECK(in_roi >= 24 && below >= 100);
+    }
+    {   // Fixed grid gives the same answer on this textured image.
+        be_config c = cfg;
+        c.grid_smart = 0;
+        Engine fx(c);
+        for (int i = 0; i < 15; ++i) r = fx.process(shifted(canvas, i * 0.5), &kShoulders, BE_GUIDE_NONE, i * 33.3);
+        CHECK(r.signal_valid && std::abs(r.dy_features - 50.0) < 5.0);
+    }
+    {   // Mostly plain shirt with a few sparse marks inside the ROI: the smart
+        // grid still finds enough of them for a valid, accurate measurement.
+        cv::Mat sparse(H + 200, W, CV_8UC3, cv::Scalar(225, 225, 225));
+        cv::RNG rng(7);
+        for (int k = 0; k < 120; ++k)
+            cv::circle(sparse, cv::Point(rng.uniform(0, W), rng.uniform(0, H + 200)), 2,
+                       cv::Scalar(90, 90, 90), -1);
+        cv::GaussianBlur(sparse, sparse, cv::Size(3, 3), 0);
+        int counts[2];
+        for (int smart = 0; smart < 2; ++smart) {
+            be_config c = cfg;
+            c.grid_smart = smart;
+            Engine g(c);
+            for (int i = 0; i < 10; ++i) r = g.process(shifted(sparse, i * 0.5), &kShoulders, BE_GUIDE_NONE, i * 33.3);
+            counts[smart] = r.feature_count;
+            if (smart) CHECK(r.signal_valid && std::abs(r.dy_features - 50.0) < 8.0);
+        }
+        std::printf("  sparse texture: fixed grid %d points, smart grid %d points\n", counts[0], counts[1]);
+        CHECK(counts[1] >= cfg.feat_min_points);
+    }
+    // Flat (textureless) image: every point rejected, no measurement.
+    Engine f(cfg);
+    const cv::Mat flat(H, W, CV_8UC3, cv::Scalar(230, 230, 230));
+    for (int i = 0; i < 5; ++i) r = f.process(flat, &kShoulders, BE_GUIDE_NONE, i * 33.3);
+    CHECK(!r.signal_valid && r.feature_count == 0);
+
+    // Shoulders near / beyond the frame edges must never throw.
+    const std::vector<Shoulders> edge = {
+        {{W * 0.3, H - 5.0}, {W * 0.7, H - 5.0}},      // torso below the frame
+        {{W - 30.0, H * 0.4}, {W + 200.0, H * 0.4}},   // off the right edge
+        {{-250.0, H * 0.4}, {10.0, H * 0.4}},          // off the left edge
+        {{W * 0.3, -300.0}, {W * 0.7, -300.0}},        // above the frame
+    };
+    for (int smart = 0; smart < 2; ++smart) {
+        be_config c = cfg;
+        c.grid_smart = smart;
+        Engine g(c);
+        bool threw = false;
+        try {
+            for (const auto& sh : edge)
+                for (int i = 0; i < 3; ++i) g.process(shifted(canvas, i * 0.5), &sh, BE_GUIDE_NONE, i * 33.3);
+        } catch (...) {
+            threw = true;
+        }
+        CHECK(!threw);
+    }
+}
+
+// Body "breathes" up 0.5 px/frame while the phone shakes the whole image.
+static void test_camera_motion() {
+    be_config cfg = be_default_config();
+    cfg.signal_source = BE_SIGNAL_GRID;
+    cfg.cam_shake_px_s = 1e9;  // test compensation only
+    const cv::Mat canvas = textured_canvas(H + 200, W);
+    auto run = [&](bool give_motion) {
+        Engine e(cfg);
+        Result r;
+        double err = 0;
+        int n = 0;
+        double cam_prev = 0;
+        for (int i = 0; i < 40; ++i) {
+            const double cam_off = 4.0 * std::sin(i * 0.9);  // hand shake, px
+            if (give_motion && i > 0) e.set_camera_motion(CamMotion{0.0, -(cam_off - cam_prev), 0.0});
+            r = e.process(shifted(canvas, i * 0.5 + cam_off), &kShoulders, BE_GUIDE_NONE, i * 33.3);
+            cam_prev = cam_off;
+            if (i >= 3 && r.signal_valid) {
+                err += std::abs(r.dy_features - 50.0);
+                ++n;
+            }
+        }
+        return n ? err / n : 1e9;
+    };
+    const double without = run(false), with = run(true);
+    std::printf("  shaking phone: error without gyro %.1f, with gyro %.1f\n", without, with);
+    CHECK(without > 100.0);
+    CHECK(with < 5.0);
+
+    // Big motion -> shaking, no measurement; recovers afterwards.
+    be_config c2 = be_default_config();
+    c2.signal_source = BE_SIGNAL_GRID;
+    Engine e(c2);
+    Result r;
+    for (int i = 0; i < 5; ++i) r = e.process(shifted(canvas, i * 0.5), &kShoulders, BE_GUIDE_NONE, i * 33.3);
+    e.set_camera_motion(CamMotion{0.0, 15.0, 0.0});
+    r = e.process(shifted(canvas, 2.5), &kShoulders, BE_GUIDE_NONE, 5 * 33.3);
+    CHECK(r.shaking && !r.signal_valid);
+    for (int i = 6; i < 20; ++i) r = e.process(shifted(canvas, i * 0.5), &kShoulders, BE_GUIDE_NONE, i * 33.3);
+    CHECK(!r.shaking && r.signal_valid);
+}
+
+static void test_feature_signal() {
+    be_config cfg = be_default_config();
+    cfg.signal_source = BE_SIGNAL_FEATURES;
+    const cv::Mat canvas = textured_canvas(H + 200, W);
+    {
+        Engine e(cfg);
+        Result r;
+        for (int i = 0; i < 15; ++i) r = e.process(shifted(canvas, i * 0.5), &kShoulders, BE_GUIDE_NONE, i * 33.3);
+        CHECK(r.signal_valid && r.feature_count >= 20);
+        CHECK(std::abs(r.dy_features - 50.0) < 5.0);  // 0.5 px up per frame * gain 100
+        CHECK(r.state_votes == State::Inhale && r.state_smooth == State::Inhale);
+        CHECK(!r.points.empty());
+    }
+    {
+        Engine e(cfg);
+        Result r;
+        for (int i = 0; i < 15; ++i) r = e.process(shifted(canvas, 10 - i * 0.5), &kShoulders, BE_GUIDE_NONE, i * 33.3);
+        CHECK(r.dy_features < -45.0 && r.state_smooth == State::Exhale);
+    }
+    {
+        Engine e(cfg);
+        Result r;
+        for (int i = 0; i < 15; ++i) r = e.process(shifted(canvas, 0), &kShoulders, BE_GUIDE_NONE, i * 33.3);
+        CHECK(std::abs(r.dy_features) < 1.0 && r.state_smooth == State::NoDetect);
+    }
+    {   // Sub-pixel breathing (3 px amplitude, 4 s period): direction mostly right.
+        for (int src : {int(BE_SIGNAL_FARNEBACK), int(BE_SIGNAL_FEATURES), int(BE_SIGNAL_GRID), 3}) {
+            be_config c = cfg;
+            c.signal_source = src == 3 ? BE_SIGNAL_GRID : src;
+            c.grid_smart = src == 3 ? 0 : 1;
+            Engine e(c);
+            int ok = 0, n = 0;
+            for (int i = 0; i < 240; ++i) {
+                const double t = i / 30.0;
+                const double off = 3.0 * std::sin(2 * CV_PI * t / 4.0);
+                const double vel = std::cos(2 * CV_PI * t / 4.0);
+                Result r = e.process(shifted(canvas, off), &kShoulders, BE_GUIDE_NONE, i * 1000.0 / 30);
+                if (i < 30) continue;
+                ++n;
+                if ((r.state_smooth == State::Inhale && vel > 0) || (r.state_smooth == State::Exhale && vel < 0)) ++ok;
+            }
+            std::printf("  sine, %s + smooth: %.0f%% of frames correct\n",
+                        src == 3 ? "fixed grid" : src == BE_SIGNAL_GRID ? "smart grid" : src == BE_SIGNAL_FEATURES ? "features" : "farneback", 100.0 * ok / n);
+            CHECK(ok > 0.75 * n);
+        }
+    }
 }
 
 int main() {
     const std::vector<std::pair<const char*, std::function<void()>>> tests = {
         {"classifier", test_classifier},
+        {"smooth_classifier", test_smooth_classifier},
+        {"feature_signal", test_feature_signal},
+        {"grid_signal", test_grid_signal},
+        {"camera_motion", test_camera_motion},
         {"roi", test_roi},
         {"engine_motion", test_engine_motion},
         {"c_api_formats_and_rotation", test_c_api_formats_and_rotation},

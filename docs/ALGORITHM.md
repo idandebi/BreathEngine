@@ -1,11 +1,11 @@
 # Breath detection algorithm — specification
 
-Source of truth: the Unity build in `breatio-RN/ios/unityExportNew2` (May 2026),
-recovered from IL2CPP output (`ShoulderDebugger`, `ShoulderRoiCutter`,
-`PoseLandmarkReceiver`). The original C# for this version is not available;
-the older decompiled C# in `Desktop/breathio/ExportedProject` was used for
-structure and naming only. The reference implementation is
-`python/breath_engine`; any port (C++ core, Android, iOS) must match it.
+This is the v1 algorithm, first shipped in a Unity app (C#) and now
+implemented as a portable engine. The reference implementation is
+`python/breath_engine`; every port (C++ core, Android, iOS) must match it,
+and `python/tools/parity.py` checks the C++ core against it frame by frame.
+The v2 additions (point-grid signal, smooth classifier, gyro compensation)
+are described at the end.
 
 ## Per-frame pipeline
 
@@ -64,7 +64,31 @@ With a guide segment (0 inhale, 1 hold-top, 2 exhale, 3 hold-bottom):
 
 ## Known caveats
 
-* Inspector overrides in the Unity scene (thresholds, smoothing, guide toggle) are not recoverable; values above are code defaults.
 * Window/threshold are in frames, so behaviour depends on camera FPS (Unity: camera rate, ~30 fps).
 * Unity runs low-light preprocessing twice on the full frame plus once on the ROI. Kept by default; `--fast` uses one pass.
 * Older game builds adapted thresholds per tunnel phase (7/22) and skipped when > 90 % of the ROI was above the shoulders; neither is in the latest build.
+
+## v2 additions (C++ core / Android)
+
+All optional and selected through `be_config`; the defaults keep v1 behaviour.
+
+* **Point-grid signal** (`BE_SIGNAL_GRID`). A grid is spread evenly over the
+  torso, from the top of the ROI (chest) down to the upper belly
+  (`grid_torso_down` × shoulder width). With `grid_smart` each cell uses its
+  best-textured pixel (max `cornerMinEigenVal`, block = LK window). Points are
+  re-placed in the previous frame on every frame and tracked into the current
+  one with pyramidal Lucas–Kanade plus a forward–backward check. The signal is
+  a robust median (MAD-rejected) of the vertical motion. The upper half
+  (`dy_chest`) and the lower half (`dy_belly`) are also reported separately,
+  so chest and diaphragmatic breathing can be told apart.
+* **Feature-tracking signal** (`BE_SIGNAL_FEATURES`). Median vertical motion of
+  Shi–Tomasi corners inside the ROI. The horizontal median (`feature_dx`)
+  measures body sway.
+* **Smooth classifier** (`BE_CLASSIFIER_SMOOTH`). Time-based (fps-independent)
+  low-pass filtering with hysteresis. It also produces `confidence`,
+  `breath_position`, `breath_count` and `breath_rate_bpm`.
+* **Camera-motion compensation** (`be_set_camera_motion`). The phone's
+  gyroscope predicts the image shift caused by hand shake. That shift is
+  subtracted from the signal, and frames above `cam_shake_px_s` are flagged as
+  `shaking` instead of being measured.
+

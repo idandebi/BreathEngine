@@ -5,3 +5,15 @@ recordings/
 *.csv
 cpp/build/
 third_party/
+android/.gradle/
+android/**/build/
+android/build/
+android/**/.cxx/
+android/local.properties
+android/game/
+android/lumen/
+logs/
+.vscode/
+.DS_Store
+.idea/
+*.iml
