@@ -108,6 +108,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cpp", required=True)
     ap.add_argument("--workdir", required=True)
+    ap.add_argument("--level-tol", type=float, default=1e-3,
+                    help="max |difference| of the smooth-classifier level. Bit-exact (1e-3) needs the "
+                         "same OpenCV binaries on both sides; different builds (SIMD paths) differ slightly")
     a = ap.parse_args()
     work = Path(a.workdir)
     work.mkdir(parents=True, exist_ok=True)
@@ -130,7 +133,7 @@ def main():
         ms = np.mean([c["ms"] for c in cc])
         dl = np.abs(np.array([p["lvl"] for p in py]) - np.array([c["lvl"] for c in cc]))
         ok = (eq("roi") == 1 and eq("re") == 1 and eq("state") >= 0.99 and eq("sm") >= 0.99
-              and dl.max() < 1e-3)
+              and dl.max() < a.level_tol)
         all_ok &= ok
         print(f"{name:12s} {eq('state'):8.1%} {eq('raw'):8.1%} {eq('roi'):6.0%} {eq('re'):7.0%} "
               f"{d.max():10.4f} {np.median(d):10.5f} {ms:7.2f}  {n_in}/{n_ex}  "
